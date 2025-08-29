@@ -1,0 +1,118 @@
+# Data directories and files
+clevrer_data/
+processed_clevrer/
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Model checkpoints and saved models
+*.ckpt
+*.pth
+*.pt
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.pb
+*.model
+checkpoints/
+models/
+saved_models/
+
+# Training logs and outputs
+runs/
+runs_ddp/
+runs_vivit_ddp/
+logs/
+outputs/
+wandb/
+tensorboard/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Configuration files with sensitive data
+.env.local
+.env.production
+config_local.py
+secrets.py
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# GPU/CUDA cache
+.nv_cache/
+
+# Large media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+*.gif
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.svg
+*.ico
+
+# Compressed files
+*.zip
+*.gz
+*.bz2
+*.xz
+*.tar.*
