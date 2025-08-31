@@ -7,4 +7,6 @@ tqdm
 matplotlib
 opencv-python
 einops
+transformers
+deepspeed
 

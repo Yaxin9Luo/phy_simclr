@@ -7,78 +7,63 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Optional
+import torch.distributed as dist
 
+# All-Gather functionality removed for performance optimization
 
 class NTXentLoss(nn.Module):
     """
-    Normalized Temperature-scaled Cross Entropy Loss (NT-Xent) for SimCLR.
+    Local NT-Xent loss (no all_gather). Expects z = [xi; xj] for the *local* batch.
     """
-    
-    def __init__(self, temperature: float = 0.5, device: Optional[str] = None):
-        super(NTXentLoss, self).__init__()
-        self.temperature = temperature
-        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
-    
+    def __init__(self, temperature: float = 0.5, device: Optional[torch.device] = None):
+        super().__init__()
+        self.temperature = float(temperature)
+        self.criterion = nn.CrossEntropyLoss(reduction="mean")
+        self.device = device
+
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        Calculate NT-Xent loss for a batch of projection vectors.
-        
-        Args:
-            z: Tensor of shape (2N, D) where N is the batch size and D is the projection dimension.
-               The first N vectors are z_i and the second N vectors are z_j (positive pairs).
-        
-        Returns:
-            loss: The NT-Xent loss value
-        """
-        # Get batch size
-        batch_size = z.shape[0] // 2
-        
-        # Normalize the projection vectors
-        z = F.normalize(z, dim=1)
-        
-        # Calculate cosine similarity matrix
-        sim_matrix = torch.mm(z, z.t()) / self.temperature  # Shape: (2N, 2N)
-        
-        # Create mask to identify positive pairs
-        # For each z_i, the positive is z_j at position i+N
-        # For each z_j, the positive is z_i at position i-N
-        mask = torch.zeros((2 * batch_size, 2 * batch_size), dtype=torch.bool).to(self.device)
-        mask[:batch_size, batch_size:] = torch.eye(batch_size, dtype=torch.bool)
-        mask[batch_size:, :batch_size] = torch.eye(batch_size, dtype=torch.bool)
-        
-        # Remove diagonal elements (self-similarity)
-        diagonal_mask = torch.eye(2 * batch_size, dtype=torch.bool).to(self.device)
-        mask = mask & ~diagonal_mask
-        
-        # Get positive and negative similarities
-        pos_sim = sim_matrix[mask].view(2 * batch_size, 1)
-        
-        # Create mask for negative samples (all samples except self and positive pair)
-        neg_mask = ~mask & ~diagonal_mask
-        
-        # Calculate loss for each sample
-        loss = 0
-        for i in range(2 * batch_size):
-            # Get positive similarity for this sample
-            pos = pos_sim[i]
-            
-            # Get negative similarities for this sample
-            neg = sim_matrix[i][neg_mask[i]]
-            
-            # Calculate log_sum_exp for numerical stability
-            logits = torch.cat([pos, neg], dim=0)
-            labels = torch.zeros(1, dtype=torch.long).to(self.device)  # Positive pair is at index 0
-            
-            loss += F.cross_entropy(logits.unsqueeze(0), labels)
-        
-        # Average loss over all samples
-        loss = loss / (2 * batch_size)
-        
+        # z: (2 * B_local, D); assume L2-normalized upstream
+        device = z.device
+        n = z.size(0)
+        assert n % 2 == 0 and n >= 4, "Local batch must be even and >= 4 (needs negatives)."
+
+        # Sanitize inputs (keep graph intact)
+        z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+        z = F.normalize(z.float(), p=2, dim=1)
+
+        # Similarity matrix
+        sim = (z @ z.T) / self.temperature  # (n, n)
+
+        # Positive index mapping within the local batch
+        half = n // 2
+        idx  = torch.arange(n, device=device)
+        pos  = torch.empty_like(idx)
+        pos[:half] = idx[:half] + half
+        pos[half:] = idx[half:] - half
+
+        # Build logits: [pos | negatives]
+        pos_logits = sim[idx, pos].unsqueeze(1)  # (n, 1)
+
+        mask = torch.ones((n, n), dtype=torch.bool, device=device)
+        mask[idx, idx] = False
+        mask[idx, pos] = False
+        neg_logits = sim[mask].view(n, -1)       # (n, n-2)
+
+        logits = torch.cat([pos_logits, neg_logits], dim=1)
+        # Stabilize numerics without breaking grads
+        logits = torch.nan_to_num(logits, neginf=-50.0, posinf=50.0).clamp_(-50.0, 50.0)
+
+        labels = torch.zeros(n, dtype=torch.long, device=device)
+        loss = self.criterion(logits, labels)
+
+        # Final safety: if non-finite, replace by a zero-like loss attached to graph
+        if not torch.isfinite(loss):
+            loss = (z.sum() * 0.0)  # keeps graph, zero gradient step
         return loss
 
 
-def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, 
-                   epoch: int, loss: float, filepath: str):
+def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
+                    epoch: int, loss: float, filepath: str):
     """Save model checkpoint."""
     checkpoint = {
         'epoch': epoch,
@@ -90,8 +75,8 @@ def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
     print(f"Checkpoint saved to {filepath}")
 
 
-def load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, 
-                   filepath: str, device: str = 'cpu'):
+def load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
+                    filepath: str, device: str = 'cpu'):
     """Load model checkpoint."""
     checkpoint = torch.load(filepath, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -104,10 +89,10 @@ def load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
 
 def set_seed(seed: int = 42):
     """Set random seeds for reproducibility."""
+    import random
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
-    import random
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False

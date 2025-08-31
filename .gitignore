@@ -116,3 +116,5 @@ tmp/
 *.bz2
 *.xz
 *.tar.*
+linear_eval_results/
+runs_deepspeed_vit_imagenet/
