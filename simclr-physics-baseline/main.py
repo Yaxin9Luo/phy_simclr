@@ -39,7 +39,7 @@ torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 def setup_ddp(rank, world_size):
     """Initialize DDP environment."""
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29600'  # Use available port
+    os.environ['MASTER_PORT'] = '29500'  # Use available port
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -123,7 +123,7 @@ def train_deepspeed(args, config):
     if 'MASTER_ADDR' not in os.environ:
         os.environ['MASTER_ADDR'] = 'localhost'
     if 'MASTER_PORT' not in os.environ:
-        os.environ['MASTER_PORT'] = '29600'
+        os.environ['MASTER_PORT'] = '29500'
     
     # DeepSpeed handles distributed initialization
     deepspeed.init_distributed()

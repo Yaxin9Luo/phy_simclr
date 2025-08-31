@@ -21,5 +21,4 @@ deepspeed --num_gpus=8 main.py \
     --lr 1e-3 \
     --temperature 0.1 \
     --checkpoint_dir runs_deepspeed_vit_imagenet \
-    --resume /data/yaxin/phy_simclr/simclr-physics-baseline/runs_deepspeed_vit_imagenet/epoch_20 \
     "$@"  # Allow passing additional arguments
