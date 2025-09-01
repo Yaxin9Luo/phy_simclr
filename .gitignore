@@ -119,3 +119,5 @@ tmp/
 linear_eval_results/
 runs_deepspeed_vit_imagenet/
 *.json
+video_runs/
+synthetic_videos/
