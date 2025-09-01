@@ -1,10 +1,11 @@
 """
-Video SimCLR dataset utilities and a simple synthetic dataset for quick testing.
+Video SimCLR dataset utilities.
 
 Provides:
 - make_video_simclr_transform: per-frame SimCLR-style augs for videos
 - VideoTwoClipTransform: returns two augmented views of the same clip
-- SyntheticBouncingBalls: on-the-fly synthetic moving balls sequences
+- SyntheticBouncingBalls: on-the-fly synthetic moving balls (for generation)
+- DiskVideoClipsDataset: disk-backed reader for saved frame folders
 """
 
 from typing import Tuple, List, Optional
@@ -216,4 +217,79 @@ class SyntheticBouncingBalls(Dataset):
                 if self.save_aug_j:
                     self._maybe_save_tensor_frames(xj, sample_dir, prefix="aug_j")
 
+        return xi, xj, label
+
+
+class DiskVideoClipsDataset(Dataset):
+    """
+    Disk-backed dataset that reads video clips saved as directories of frames.
+
+    Expected directory structure:
+      root/
+        sample_000000/
+          raw_frame_00.png, raw_frame_01.png, ...
+          metadata.json (optional, may contain label info)
+        sample_000001/
+          ...
+
+    Returns two augmented views of each clip suitable for SimCLR.
+    """
+
+    def __init__(self, root_dir: str, img_size: int = 224, frame_glob_prefix: str = "raw_frame_",
+                 transform: Optional[transforms.Compose] = None, use_metadata_label: bool = True):
+        super().__init__()
+        self.root_dir = root_dir
+        self.img_size = img_size
+        self.frame_glob_prefix = frame_glob_prefix
+        self.transform = transform if transform is not None else VideoTwoClipTransform(
+            make_video_simclr_transform(img_size=img_size)
+        )
+        self.use_metadata_label = use_metadata_label
+
+        # collect sample directories
+        subs = [os.path.join(root_dir, d) for d in os.listdir(root_dir)] if os.path.isdir(root_dir) else []
+        self.sample_dirs = sorted([p for p in subs if os.path.isdir(p)])
+        if len(self.sample_dirs) == 0:
+            raise FileNotFoundError(f"No sample directories found in {root_dir}")
+
+    def __len__(self):
+        return len(self.sample_dirs)
+
+    def _load_clip_frames(self, sample_dir: str) -> List[Image.Image]:
+        # List files matching prefix and png
+        names = [n for n in os.listdir(sample_dir) if n.startswith(self.frame_glob_prefix) and n.endswith('.png')]
+        if len(names) == 0:
+            # fallback: any png frames
+            names = [n for n in os.listdir(sample_dir) if n.endswith('.png')]
+        names = sorted(names)
+        frames: List[Image.Image] = []
+        for n in names:
+            img = Image.open(os.path.join(sample_dir, n)).convert('RGB')
+            # Resize to img_size if needed
+            if img.size != (self.img_size, self.img_size):
+                img = img.resize((self.img_size, self.img_size), resample=Image.BILINEAR)
+            frames.append(img)
+        if len(frames) == 0:
+            raise FileNotFoundError(f"No frames in {sample_dir}")
+        return frames
+
+    def _maybe_load_label(self, sample_dir: str) -> int:
+        if not self.use_metadata_label:
+            return -1
+        meta_path = os.path.join(sample_dir, 'metadata.json')
+        if os.path.exists(meta_path):
+            try:
+                import json
+                with open(meta_path, 'r') as f:
+                    meta = json.load(f)
+                return int(meta.get('label_num_balls_minus_1', -1))
+            except Exception:
+                return -1
+        return -1
+
+    def __getitem__(self, idx: int):
+        sample_dir = self.sample_dirs[idx]
+        frames = self._load_clip_frames(sample_dir)
+        label = self._maybe_load_label(sample_dir)
+        xi, xj = self.transform(frames)  # (T,C,H,W)
         return xi, xj, label

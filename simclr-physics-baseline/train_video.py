@@ -1,9 +1,10 @@
 """
-Minimal single-GPU VideoSimCLR training on synthetic bouncing balls.
+Minimal single-GPU VideoSimCLR training on disk-backed synthetic videos.
 
 Usage:
   python train_video.py \
-    --epochs 5 --batch_size 64 --frames 8 --img_size 224 \
+    --data_dir simclr-physics-baseline/synthetic_videos \
+    --epochs 5 --batch_size 64 --img_size 224 \
     --lr 3e-4 --projection_dim 128 --base_model vit_base
 """
 
@@ -14,7 +15,7 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 
-from video_dataset import SyntheticBouncingBalls
+from video_dataset import DiskVideoClipsDataset
 from video_model import VideoSimCLRModel
 from utils import NTXentLoss, set_seed, save_checkpoint
 
@@ -77,9 +78,8 @@ def main():
     parser = argparse.ArgumentParser(description='VideoSimCLR training on synthetic data')
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--frames', type=int, default=8)
+    parser.add_argument('--data_dir', type=str, required=True, help='Directory of saved synthetic videos (folder-of-folders)')
     parser.add_argument('--img_size', type=int, default=224)
-    parser.add_argument('--synthetic_len', type=int, default=10000, help='Number of samples in synthetic dataset')
     parser.add_argument('--base_model', type=str, default='vit_base')
     parser.add_argument('--projection_dim', type=int, default=128)
     parser.add_argument('--lr', type=float, default=3e-4)
@@ -87,12 +87,6 @@ def main():
     parser.add_argument('--temperature', type=float, default=0.2)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--checkpoint_dir', type=str, default='video_runs')
-    # Saving synthetic clips for visualization
-    parser.add_argument('--save_clips_dir', type=str, default=None,
-                       help='If set, saves synthetic clips periodically to this directory')
-    parser.add_argument('--save_every', type=int, default=0, help='Save every K-th sample (0 disables)')
-    parser.add_argument('--save_limit', type=int, default=None, help='Max number of samples to save (based on save_every)')
-    parser.add_argument('--save_aug', action='store_true', help='Also save augmented views along with raw frames')
     parser.add_argument('--checkpoint_interval', type=int, default=1)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--amp', action='store_true')
@@ -111,17 +105,9 @@ def main():
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
     # Data
-    dataset = SyntheticBouncingBalls(
-        length=args.synthetic_len,
-        num_frames=args.frames,
-        img_size=args.img_size,
-        save_dir=args.save_clips_dir,
-        save_every=args.save_every,
-        save_limit=args.save_limit,
-        save_raw=True,
-        save_aug_i=args.save_aug,
-        save_aug_j=args.save_aug,
-    )
+    if not os.path.isdir(args.data_dir):
+        raise FileNotFoundError(f"--data_dir not found: {args.data_dir}")
+    dataset = DiskVideoClipsDataset(root_dir=args.data_dir, img_size=args.img_size)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
