@@ -46,7 +46,7 @@ class TemporalEncoder(nn.Module):
         pretrained: bool = True,
         vit_representation: Literal["cls", "mean"] = "cls",
         use_flash_attn: bool = True,
-        temporal_agg: Literal["mean", "transformer"] = "mean",
+        temporal_agg: Literal["mean", "transformer"] = "transformer",
         transformer_hidden: Optional[int] = None,
         n_layers: int = 2,
         n_heads: int = 4,
@@ -110,7 +110,7 @@ class VideoSimCLRModel(nn.Module):
         proj_hidden_dim: int = 2048,
         use_bn_out: bool = True,
         use_flash_attn: bool = True,
-        temporal_agg: Literal["mean", "transformer"] = "mean",
+        temporal_agg: Literal["mean", "transformer"] = "transformer",
     ):
         super().__init__()
         self.encoder = TemporalEncoder(

@@ -16,8 +16,16 @@ import torch
 from torch.utils.data import DataLoader
 
 from video_dataset import DiskVideoClipsDataset
+from flow_proxy_dataset import FlowProxyDataset
 from video_model import VideoSimCLRModel
 from utils import NTXentLoss, set_seed, save_checkpoint
+
+# Optional DeepSpeed
+try:
+    import deepspeed
+    _HAS_DEEPSPEED = True
+except Exception:
+    _HAS_DEEPSPEED = False
 
 
 def maybe_cosine_with_warmup(optimizer, num_epochs, steps_per_epoch, warmup_ratio=0.1):
@@ -93,6 +101,16 @@ def main():
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--temporal', type=str, default='mean', choices=['mean', 'transformer'])
     parser.add_argument('--seed', type=int, default=42)
+    # Proxy sampling
+    parser.add_argument('--use_proxy_sampler', action='store_true', help='Use flow-proxy KNN positives')
+    parser.add_argument('--flow_stats', type=str, default=None, help='Path to flow_stats.json (relative to data_dir if not absolute)')
+    parser.add_argument('--k_pos', type=int, default=5)
+    parser.add_argument('--no_same_clip_pos', action='store_true', help='Disallow positives from same clip')
+    parser.add_argument('--min_time_sep', type=int, default=0, help='Min start-index separation for same-clip positives')
+    # DeepSpeed
+    parser.add_argument('--deepspeed', action='store_true', help='Use DeepSpeed for multi-GPU training')
+    parser.add_argument('--deepspeed_config', type=str, default='deepspeed_config.json')
+    parser.add_argument('--local_rank', type=int, default=0, help='Set by launcher')
 
     args = parser.parse_args()
 
@@ -107,7 +125,24 @@ def main():
     # Data
     if not os.path.isdir(args.data_dir):
         raise FileNotFoundError(f"--data_dir not found: {args.data_dir}")
-    dataset = DiskVideoClipsDataset(root_dir=args.data_dir, img_size=args.img_size)
+    if args.use_proxy_sampler:
+        stats_path = args.flow_stats
+        if stats_path is None:
+            stats_path = os.path.join(args.data_dir, 'flow_stats.json')
+        if not os.path.isabs(stats_path):
+            stats_path = os.path.join(args.data_dir, os.path.basename(stats_path))
+        if not os.path.isfile(stats_path):
+            raise FileNotFoundError(f"flow_stats not found: {stats_path}. Run compute_flow_stats.py first.")
+        dataset = FlowProxyDataset(
+            root_dir=args.data_dir,
+            stats_path=stats_path,
+            img_size=args.img_size,
+            k_pos=args.k_pos,
+            allow_same_clip_pos=not args.no_same_clip_pos,
+            min_time_separation=args.min_time_sep,
+        )
+    else:
+        dataset = DiskVideoClipsDataset(root_dir=args.data_dir, img_size=args.img_size)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -118,7 +153,67 @@ def main():
         persistent_workers=(args.workers > 0),
     )
 
-    # Model
+    # DeepSpeed multi-GPU path
+    if args.deepspeed and _HAS_DEEPSPEED:
+        # init distributed
+        deepspeed.init_distributed()
+        local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+        device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+
+        model = VideoSimCLRModel(
+            base_model=args.base_model,
+            projection_dim=args.projection_dim,
+            img_size=args.img_size,
+            pretrained=False,
+            temporal_agg=args.temporal,
+        )
+
+        # Initialize DeepSpeed engine; let DS build the distributed DataLoader
+        model_engine, optimizer, ds_loader, ds_scheduler = deepspeed.initialize(
+            model=model,
+            training_data=dataset,
+            config=args.deepspeed_config,
+        )
+
+        criterion = NTXentLoss(temperature=args.temperature, device=device)
+
+        if local_rank == 0:
+            print("Starting DeepSpeed VideoSimCLR training...")
+            print(f"Dataset size: {len(dataset)}, steps/epoch: {len(ds_loader)}")
+
+        for epoch in range(1, args.epochs + 1):
+            model_engine.train()
+            total_loss = 0.0
+            num_batches = 0
+            progress = tqdm(ds_loader, desc=f"Epoch {epoch}/{args.epochs}") if local_rank == 0 else ds_loader
+            for batch_idx, (clip_i, clip_j, _) in enumerate(progress):
+                clip_i = clip_i.to(device, non_blocking=True)
+                clip_j = clip_j.to(device, non_blocking=True)
+                x = torch.cat([clip_i, clip_j], dim=0)  # (2B,T,C,H,W)
+                z = model_engine(x)
+                loss = criterion(z)
+                model_engine.backward(loss)
+                model_engine.step()
+                total_loss += loss.item()
+                num_batches += 1
+                if local_rank == 0 and hasattr(progress, 'set_postfix'):
+                    progress.set_postfix({'loss': f'{loss.item():.4f}', 'avg_loss': f'{(total_loss/num_batches):.4f}'})
+
+            avg_loss = total_loss / max(1, num_batches)
+            if local_rank == 0:
+                print(f"Epoch {epoch} avg loss: {avg_loss:.4f}")
+
+            if epoch % args.checkpoint_interval == 0:
+                ckpt_dir = os.path.join(args.checkpoint_dir, f'epoch_{epoch}')
+                model_engine.save_checkpoint(ckpt_dir)
+
+        if local_rank == 0:
+            final_dir = os.path.join(args.checkpoint_dir, 'final_model')
+            model_engine.save_checkpoint(final_dir)
+            print("DeepSpeed training complete.")
+        return
+
+    # ----- Single GPU path -----
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     model = VideoSimCLRModel(
         base_model=args.base_model,
